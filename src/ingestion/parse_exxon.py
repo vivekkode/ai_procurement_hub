@@ -230,26 +230,83 @@ def parse_exxon_file(filepath: str) -> pd.DataFrame:
         else:
             logger.warning("No date found for %s", filepath.name)
 
+    # -- Build column map from header row (row index 2) -----------------------
+    # This makes the parser resilient to column reordering.
+    # Instead of assuming Terminal is always col 0, Producto always col 2 etc,
+    # we find each column by its name keyword — so even if Exxon inserts a
+    # new column or shuffles the order, we still read the right values.
+
+    def find_col(col_map, *keywords):
+        """
+        Find column index by searching for all keywords in column name.
+        Returns None if no match found — caller falls back to index position.
+
+        Example:
+            find_col(col_map, "facturaci")  -> finds "Precio Facturación..."
+            find_col(col_map, "descuento")  -> finds "Descuento (MXN/L)"
+        """
+        for name, idx in col_map.items():
+            if all(kw in name for kw in keywords):
+                return idx
+        return None
+
+    header_row = all_rows[2] if len(all_rows) > 2 else ()
+    col_map = {}
+    for i, cell in enumerate(header_row):
+        if cell:
+            # Normalize: lowercase, strip whitespace and newlines
+            key = str(cell).lower().strip().replace("\n", " ")
+            col_map[key] = i
+
+    # Locate each column by name keyword — with fallback to original positions
+    # Fallbacks ensure backward compatibility if header row is missing/changed
+    idx_terminal = find_col(col_map, "terminal")                         or 0
+    idx_category = find_col(col_map, "categor")                          or 1
+    idx_product  = find_col(col_map, "producto")                         or 2
+    idx_ref      = find_col(col_map, "referencia")                       or 3
+    idx_discount = find_col(col_map, "descuento")                        or 4
+    idx_invoice  = find_col(col_map, "facturaci") or find_col(col_map, "facturacion") or 5
+
+    # Log column mapping so any mismatch is immediately visible in the logs
+    logger.debug(
+        "%s column map: terminal=%s, product=%s, discount=%s, invoice=%s",
+        filepath.name, idx_terminal, idx_product, idx_discount, idx_invoice
+    )
+
+    # Warn if any column was not found by name and fell back to position
+    expected = {
+        "terminal": (find_col(col_map, "terminal"), 0),
+        "product":  (find_col(col_map, "producto"), 2),
+        "discount": (find_col(col_map, "descuento"), 4),
+        "invoice":  (find_col(col_map, "facturaci") or find_col(col_map, "facturacion"), 5),
+    }
+    for col_name, (found, fallback) in expected.items():
+        if found is None:
+            logger.warning(
+                "%s: '%s' column not found by name — using fallback position %d. "
+                "Check if Exxon changed their column headers.",
+                filepath.name, col_name, fallback
+            )
+
     # -- Extract data rows ----------------------------------------------------
     # Row 1 = title, Row 2 = empty, Row 3 = headers, Rows 4+ = data
-    # Skip first 3 rows and start reading data from row index 3
     rows = []
 
     for row in all_rows[3:]:  # start after header row
         # Skip empty rows and disclaimer row
-        if not row[0] or not isinstance(row[0], str):
+        if not row[idx_terminal] or not isinstance(row[idx_terminal], str):
             continue
 
         # Skip the disclaimer row at the bottom
-        if "sintéticos" in str(row[0]) or "Datos" in str(row[0]):
+        if "sintéticos" in str(row[idx_terminal]) or "Datos" in str(row[idx_terminal]):
             continue
 
-        terminal_raw  = row[0]
-        contract_type = row[1] if row[1] else "Wholesale"
-        product_raw   = row[2]
-        ref_price     = safe_float(row[3])
-        discount      = safe_float(row[4])
-        invoice_price = safe_float(row[5])
+        terminal_raw  = row[idx_terminal]
+        contract_type = row[idx_category] if row[idx_category] else "Wholesale"
+        product_raw   = row[idx_product]
+        ref_price     = safe_float(row[idx_ref])
+        discount      = safe_float(row[idx_discount])
+        invoice_price = safe_float(row[idx_invoice])
 
         # Must have a terminal and product and a valid price
         if not terminal_raw or not product_raw or invoice_price is None:
