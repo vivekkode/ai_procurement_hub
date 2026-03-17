@@ -96,9 +96,14 @@ PRODUCT_MAP = {
 
 # Spanish month names for date parsing
 MONTHS_ES = {
+    # Full names
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
     "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
     "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
+    # Abbreviated names (possible future format change)
+    "ene": 1, "feb": 2, "mar": 3, "abr": 4,
+    "may": 5, "jun": 6, "jul": 7, "ago": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dic": 12,
 }
 
 
@@ -254,10 +259,25 @@ def parse_page(page_text: str, date_start: str, date_end: str,
     # Region names: all uppercase, no digits, length > 2
     # Skip known header lines
     skip_words = {
-        "PETRÓLEOS MEXICANOS", "REGIÓN", "PEMEX MAGNA", "PEMEX PREMIUM",
-        "PEMEX DIESEL", "DIESEL", "GASOLINA CON CONTENIDO MÍNIMO 87 OCTANOS",
+        # Standard headers
+        "PETRÓLEOS MEXICANOS", "PETROLEOS MEXICANOS",
+        "REGIÓN", "REGION",
+        # Possible renamed column header
+        "ZONA", "ZONA GEOGRÁFICA", "ZONA GEOGRAFICA", "LOCALIDAD",
+        # Product labels — current
+        "PEMEX MAGNA", "PEMEX PREMIUM", "PEMEX DIESEL", "DIESEL",
+        # Product labels — possible future variants
+        "PEMEX MAGNA REGULAR", "MAGNA REGULAR",
+        "PEMEX PREMIUM PLUS", "PREMIUM PLUS",
+        # Product descriptions — current
+        "GASOLINA CON CONTENIDO MÍNIMO 87 OCTANOS",
         "GASOLINA CON CONTENIDO MÍNIMO 91 OCTANOS",
         "GASOLINA CON CONTENIDO MÍNIMO 87 OCTANOS - PEMEX MAGNA",
+        # Product descriptions — without accent or abbreviated
+        "GASOLINA CON CONTENIDO MINIMO 87 OCTANOS",
+        "GASOLINA CON CONTENIDO MINIMO 91 OCTANOS",
+        "GASOLINA 87 OCTANOS", "GASOLINA 91 OCTANOS",
+        "GASOLINA MAGNA REGULAR", "GASOLINA PREMIUM PLUS",
     }
 
     regions = []
