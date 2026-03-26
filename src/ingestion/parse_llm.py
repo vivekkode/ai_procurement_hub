@@ -72,6 +72,7 @@ Usage:
 
 import json
 import logging
+import os
 import re
 import urllib.request
 from dataclasses import dataclass, field, asdict
@@ -80,6 +81,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +383,11 @@ class UnstructuredParser:
         req = urllib.request.Request(
             "https://api.anthropic.com/v1/messages",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": os.getenv("ANTHROPIC_API_KEY", ""),
+                "anthropic-version": "2023-06-01",
+            },
             method="POST"
         )
 

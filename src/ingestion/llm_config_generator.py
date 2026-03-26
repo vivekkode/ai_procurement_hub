@@ -46,8 +46,12 @@ Usage:
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -480,7 +484,11 @@ class LLMConfigGenerator:
         req = urllib.request.Request(
             "https://api.anthropic.com/v1/messages",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": os.getenv("ANTHROPIC_API_KEY", ""),
+                "anthropic-version": "2023-06-01",
+            },
             method="POST"
         )
 
