@@ -192,9 +192,10 @@ class GenericParser:
             return pd.DataFrame()
 
         combined = pd.concat(frames, ignore_index=True)
-        combined = combined.drop_duplicates(
-            subset=["date", "terminal_id", "product_type"]
-        )
+        # Do NOT deduplicate by terminal+product+date alone —
+        # multiple rows per terminal per day are valid intraday price updates.
+        # Only remove exact duplicate rows (all columns identical).
+        combined = combined.drop_duplicates()
         combined = combined.sort_values("date").reset_index(drop=True)
 
         self.logger.info(
