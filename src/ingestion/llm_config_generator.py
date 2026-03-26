@@ -476,7 +476,7 @@ class LLMConfigGenerator:
         prompt = self._build_prompt(sample, supplier_name, filename)
 
         payload = json.dumps({
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-5",
             "max_tokens": 1000,
             "messages": [{"role": "user", "content": prompt}]
         }).encode("utf-8")

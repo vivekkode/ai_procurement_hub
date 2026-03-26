@@ -375,7 +375,7 @@ class UnstructuredParser:
         prompt = self._build_prompt(content, supplier_hint, source_label)
 
         payload = json.dumps({
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-5",
             "max_tokens": 1000,
             "messages": [{"role": "user", "content": prompt}]
         }).encode("utf-8")
