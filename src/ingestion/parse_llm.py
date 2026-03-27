@@ -395,6 +395,10 @@ class UnstructuredParser:
             with urllib.request.urlopen(req) as response:
                 data = json.loads(response.read())
                 return data["content"][0]["text"]
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            self.logger.error("Claude API HTTP %s: %s", e.code, error_body)
+            raise ValueError(f"LLM API call failed: {e.code} — {error_body}")
         except Exception as e:
             self.logger.error("Claude API call failed: %s", e)
             raise ValueError(f"LLM API call failed: {e}")
