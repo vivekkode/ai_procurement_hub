@@ -153,6 +153,10 @@ Expected output:
 python tests/test_parsers.py
 ```
 **7. Synthetic data for delivery windows, MOQs, surcharges, and contract terms**
+Run below
+```bash
+python src/ingestion/synthetic_data.py
+```
 
 Updated Expected output:
 ```
