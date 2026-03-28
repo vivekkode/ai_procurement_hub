@@ -1,0 +1,23 @@
+# Virtual environment
+venv/
+
+# Python cache - never commit these
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.cpython-*.pyc
+
+# Data files
+data/raw/
+data/processed/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+
+# VS Code
+.vscode/
+.env
