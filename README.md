@@ -152,6 +152,28 @@ Expected output:
 ```bash
 python tests/test_parsers.py
 ```
+**7. Synthetic data for delivery windows, MOQs, surcharges, and contract terms**
+
+Updated Expected output:
+```
+=================================================================
+Supplier           Records   Terminals    Flagged
+-----------------------------------------------------------------
+Valero              16,849           9          0
+Exxon                4,905           3          0
+Marathon            16,350          10          0
+Pemex               25,974          78          0
+-----------------------------------------------------------------
+TOTAL               64,078                      0
+=================================================================
+Date range     : 2024-01-01 to 2026-01-30
+Products       : ['Diesel', 'Premium', 'Regular']
+Output file    : data/processed/all_suppliers.csv
+=================================================================
+2026-03-28 22:05:40,311 [INFO] __main__: Ingestion complete
+delivery window / MOQs / surcharges / contract terms
+
+```
 
 ---
 
