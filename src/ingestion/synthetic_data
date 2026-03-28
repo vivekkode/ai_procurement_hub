@@ -1,0 +1,62 @@
+'''
+This creates sythetic data for each of the unprovided project variables;
+a)delivery windows; b)MOQs; c)surcharges and d)contract terms
+'''
+
+import pandas as pd
+import numpy as np
+import random
+import os
+from datetime import datetime, timedelta
+
+config = {
+    'Valero':   {'records': 16849, 'terminals': 9},
+    'Exxon':    {'records': 4905,  'terminals': 3},
+    'Marathon': {'records': 16350, 'terminals': 10},
+    'Pemex':    {'records': 25974, 'terminals': 78}
+}
+
+products = ['Diesel', 'Premium', 'Regular']
+windows = ['08:00-12:00', '12:00-16:00', '16:00-20:00', 'Overnight']
+terms = ['Net 30', 'Net 15', 'Prepaid', 'Consignment']
+start_date = datetime(2024, 1, 1)
+end_date = datetime(2026, 1, 30)
+
+data_rows = []
+for supplier, details in config.items():
+    for _ in range(details['records']):
+        random_days = random.randint(0, (end_date - start_date).days)
+        row = {
+            'Date': (start_date + timedelta(days=random_days)).strftime('%Y-%m-%d'),
+            'Supplier': supplier,
+            'Terminal_ID': random.randint(1, details['terminals']),
+            'Product': random.choice(products),
+            'Delivery_Window': random.choice(windows),
+            'MOQ_Liters': random.choice([20000, 31000, 45000]),
+            'Base_Price_MXN': round(random.uniform(18.5, 22.0), 2),
+            'Surcharges_MXN': round(random.uniform(0.05, 0.45), 2),
+            'Contract_Terms': random.choice(terms),
+            'Flagged': 0
+        }
+        data_rows.append(row)
+
+df = pd.DataFrame(data_rows)
+os.makedirs('data/processed', exist_ok=True)
+df.to_csv('data/processed/all_suppliers.csv', index=False)
+
+print("=" * 110)
+print(f"  {'Supplier':<15} {'Records':>10} {'Terminals':>11} {'Windows':>10} {'MOQs':>10} {'Surcharges':>12} {'Terms':>10} {'Flagged':>10}")
+print("-" * 110)
+for s, d in config.items():
+    print(f"  {s:<15} {d['records']:>10,} {d['terminals']:>11} {'YES':>10} {'YES':>10} {'YES':>12} {'YES':>10} {0:>10}")
+print("-" * 110)
+print(f"  {'TOTAL':<15} {len(df):>10,} {'':>11} {'':>10} {'':>10} {'':>12} {'':>10} {0:>10}")
+print("=" * 110)
+
+print(f"\\n  Date range     : {start_date.date()} to {end_date.date()}")
+print(f"  Products       : {products}")
+print(f"  Output file    : data/processed/all_suppliers.csv")
+print("=" * 110)
+print(f"\\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]} [INFO] __main__: Ingestion complete")
+print("delivery window / MOQs / surcharges / contract terms")
+''')
