@@ -8,13 +8,6 @@ Reads:
 
 Outputs:
     data/processed/normalized_prices.csv
-
-Purpose:
-    - Standardize product names
-    - Normalize supplier names
-    - Ensure price consistency (MXN per liter)
-    - Clean invalid / missing data
-    - Prepare dataset for optimization engine
 """
 
 import pandas as pd
@@ -36,7 +29,6 @@ VALID_PRODUCTS = ["regular", "premium", "diesel"]
 # ==============================
 
 def normalize_product(product: str) -> str:
-    """Convert product names to standard: regular, premium, diesel"""
     if pd.isna(product):
         return None
 
@@ -53,7 +45,6 @@ def normalize_product(product: str) -> str:
 
 
 def normalize_supplier(supplier: str) -> str:
-    """Standardize supplier names"""
     if pd.isna(supplier):
         return None
 
@@ -72,7 +63,6 @@ def normalize_supplier(supplier: str) -> str:
 
 
 def clean_price(price):
-    """Ensure price is numeric and valid"""
     try:
         price = float(price)
         if price <= 0:
@@ -80,6 +70,65 @@ def clean_price(price):
         return price
     except:
         return None
+
+
+# ==============================
+# TERMINAL + STATE FIXES
+# ==============================
+
+def fix_terminal_id(df):
+    # Step 1: fill with terminal_name
+    df["terminal_id"] = df["terminal_id"].fillna(df["terminal_name"])
+
+    # Step 2: generate IDs ONLY for remaining missing
+    missing_mask = df["terminal_id"].isna()
+
+    df.loc[missing_mask, "terminal_id"] = (
+        "T_" + df.loc[missing_mask].index.astype(str)
+    )
+
+    return df
+
+def extract_state_from_name(name):
+    if pd.isna(name):
+        return None
+
+    name = str(name).lower()
+
+    states_map = {
+        "veracruz": "Veracruz",
+        "tamaulipas": "Tamaulipas",
+        "nuevo leon": "Nuevo Leon",
+        "monterrey": "Nuevo Leon",
+        "guadalajara": "Jalisco",
+        "jalisco": "Jalisco",
+        "cdmx": "CDMX",
+        "mexico": "Estado de Mexico",
+        "sonora": "Sonora",
+        "sinaloa": "Sinaloa",
+        "coahuila": "Coahuila",
+        "chihuahua": "Chihuahua",
+        "puebla": "Puebla",
+        "yucatan": "Yucatan",
+    }
+
+    for key, value in states_map.items():
+        if key in name:
+            return value
+
+    return None
+
+
+def fix_state(df):
+    df["state"] = df.apply(
+        lambda row: extract_state_from_name(row["terminal_name"])
+        if pd.isna(row["state"]) else row["state"],
+        axis=1
+    )
+
+    df["state"] = df["state"].fillna("UNKNOWN")
+
+    return df
 
 
 # ==============================
@@ -96,51 +145,35 @@ def normalize_prices():
 
     print(f"Initial rows: {len(df)}")
 
-    # ----------------------------------------
-    # DATE CLEANING
-    # ----------------------------------------
+    # DATE
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
-    # ----------------------------------------
-    # PRODUCT NORMALIZATION
-    # ----------------------------------------
+    # PRODUCT
     df["product"] = df["product_type"].apply(normalize_product)
 
-    # ----------------------------------------
-    # SUPPLIER NORMALIZATION
-    # ----------------------------------------
+    # SUPPLIER
     df["supplier"] = df["supplier"].apply(normalize_supplier)
 
-    # ----------------------------------------
-    # PRICE CLEANING
-    # ----------------------------------------
+    # PRICE
     df["price_mxn_litre"] = df["price_mxn_per_l"].apply(clean_price)
 
-    # ----------------------------------------
-    # REMOVE INVALID ROWS
-    # ----------------------------------------
-    df = df.dropna(subset=[
-        "date",
-        "product",
-        "price_mxn_litre"
-    ])
+    # REMOVE INVALID
+    df = df.dropna(subset=["date", "product", "price_mxn_litre"])
 
-    # ----------------------------------------
-    # FILTER VALID PRODUCTS
-    # ----------------------------------------
+    # VALID PRODUCTS
     df = df[df["product"].isin(VALID_PRODUCTS)]
 
-    # ----------------------------------------
-    # REMOVE OUTLIERS (optional but useful)
-    # ----------------------------------------
+    # REMOVE OUTLIERS
     df = df[
         (df["price_mxn_litre"] >= 10) &
         (df["price_mxn_litre"] <= 40)
     ]
 
-    # ----------------------------------------
+    # FIX TERMINAL + STATE
+    df = fix_terminal_id(df)
+    df = fix_state(df)
+
     # FINAL SCHEMA
-    # ----------------------------------------
     final_df = df[[
         "date",
         "supplier",
@@ -154,23 +187,17 @@ def normalize_prices():
         "source_file"
     ]].copy()
 
-    # ----------------------------------------
     # REMOVE DUPLICATES
-    # ----------------------------------------
     final_df = final_df.drop_duplicates()
 
-    # ----------------------------------------
     # SORT
-    # ----------------------------------------
     final_df = final_df.sort_values(
         ["date", "supplier", "terminal_id"]
     ).reset_index(drop=True)
 
     print(f"✅ Cleaned rows: {len(final_df)}")
 
-    # ----------------------------------------
-    # SAVE OUTPUT
-    # ----------------------------------------
+    # SAVE
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     final_df.to_csv(OUTPUT_FILE, index=False)
 
@@ -180,7 +207,7 @@ def normalize_prices():
 
 
 # ==============================
-# ENTRY POINT
+# RUN
 # ==============================
 
 if __name__ == "__main__":
