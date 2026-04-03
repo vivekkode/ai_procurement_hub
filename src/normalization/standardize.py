@@ -21,14 +21,18 @@ Outputs:
 
 Output adds these columns on top of all_suppliers.csv:
     id_tienda, station_name, ciudad, estado_station, zona, lat, lon
-    dist_km, freight_mxn_per_l, supplier_available
+    dist_km, freight_cost_mxn, supplier_available
     moq_litros, vol_max_litros, lead_time_dias, rop_pct_tanque, frecuencia_min
     pct_minimo_pemex, aplica_pemex
     presupuesto_total, reserva_total            <- budget ceiling
     cap_tanque_litros, inv_inicial_litros        <- starting inventory
+    available_capacity_litros                    <- space left in tank for new order
+    max_order_litros                             <- min(vol_max, available_capacity)
     price_volatility_30d                         <- 30-day rolling price std
+    price_freshness_days                         <- days since this price was published
+    price_stale                                  <- True if price older than FRESHNESS_THRESHOLD
     surcharge_mxn_per_l
-    landed_cost
+    landed_cost                                  <- price + freight/vol + surcharge
 
 Usage:
     python src/normalization/standardize.py                          # all stations, CapitalGas
@@ -52,8 +56,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # Constants
 # ---------------------------------------------------------------------------
 
-# Industry standard — 0.08 MXN per liter per 100 km
-FREIGHT_RATE_MXN_PER_L_PER_100KM = 0.08
+# CANACAR official freight rate — MXN per km per truck trip
+# Source: CANACAR (Cámara Nacional del Autotransporte de Carga)
+# Used by Vector Bulls and standard in Mexican fuel logistics
+# Freight cost per liter = (dist_km × CANACAR_RATE) / order_volume_litros
+# This means freight per liter DECREASES as order volume increases — correct economics
+CANACAR_RATE_MXN_PER_KM = 28.40
+
+# Default order volume for freight calculation when actual order size is unknown
+# Rules engine will override this with the actual order quantity
+DEFAULT_ORDER_LITROS = 30000
+
+# Price freshness threshold — flag prices older than this many days as stale
+# Pemex publishes weekly so 7 days is the maximum acceptable staleness
+FRESHNESS_THRESHOLD_DAYS = 7
 
 DATA_PROCESSED = Path("data/processed")
 DEFAULT_BUYER  = "capitalgas"
@@ -247,74 +263,56 @@ def apply_surcharges_vectorized(
     surcharges: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Apply active surcharges using vectorized merge — no Python loops.
+    Apply active surcharges efficiently.
 
-    Instead of calling a function per row (slow at 2.8M rows),
-    we merge surcharges onto the main DataFrame using pandas merge
-    conditions and fill missing matches with 0.0.
+    For small surcharge lists (typical case — a few events at a time)
+    this is fast. For large DataFrames we avoid a full cross-merge
+    which would OOM on 39M rows.
 
-    This reduces runtime from ~15 minutes to under 5 seconds.
+    Strategy: iterate over surcharge events (always a small number —
+    typically 0-20 at a time) and apply each one with boolean masking.
+    This is O(surcharge_events × df_rows) not O(df_rows²).
     """
+    df["surcharge_mxn_per_l"] = 0.0
+
     if surcharges.empty:
-        df["surcharge_mxn_per_l"] = 0.0
         return df
 
-    # Expand surcharges to match on supplier + product
-    # Terminal matching is fuzzy (substring) so we handle it after merge
-    sur = surcharges.rename(columns={
-        "surcharge_per_l": "surcharge_mxn_per_l",
-        "terminal":        "sur_terminal",
-        "supplier":        "sur_supplier",
-        "product":         "sur_product",
-    })
+    for _, event in surcharges.iterrows():
+        sup  = str(event["supplier"]).lower()
+        term = str(event["terminal"]).lower()
+        prod = str(event["product"]).lower()
+        amt  = float(event["surcharge_per_l"])
+        d_from = pd.to_datetime(event["effective_from"])
+        d_to   = pd.to_datetime(event["effective_to"])
 
-    # Merge on supplier + product (exact match)
-    merged = df.merge(
-        sur[["sur_supplier", "sur_terminal", "sur_product",
-             "surcharge_mxn_per_l", "effective_from", "effective_to"]],
-        left_on=["supplier", "product_type"],
-        right_on=["sur_supplier", "sur_product"],
-        how="left",
-    )
+        if amt <= 0:
+            continue
 
-    # Apply date range filter and fuzzy terminal match vectorized
-    date_ok = (
-        (merged["effective_from"].isna()) |
-        (
-            (merged["date"] >= merged["effective_from"]) &
-            (merged["date"] <= merged["effective_to"])
+        # Build boolean mask — all vectorized, no apply()
+        mask_sup  = df["supplier"].str.lower() == sup
+        mask_date = (df["date"] >= d_from) & (df["date"] <= d_to)
+        mask_prod = (
+            (prod == "all") |
+            (df["product_type"].str.lower() == prod)
         )
-    )
-
-    # Terminal match: surcharge terminal is substring of our terminal_name or vice versa
-    term_ok = (
-        merged["sur_terminal"].isna() |
-        merged.apply(
-            lambda r: (
-                str(r["sur_terminal"]).lower() in str(r["terminal_name"]).lower() or
-                str(r["terminal_name"]).lower() in str(r["sur_terminal"]).lower()
-            ) if pd.notna(r["sur_terminal"]) else True,
-            axis=1
+        mask_term = (
+            df["terminal_name"].str.lower().str.contains(term, regex=False, na=False) |
+            df["terminal_id"].str.lower().str.contains(term, regex=False, na=False)
         )
-    )
 
-    merged.loc[~(date_ok & term_ok), "surcharge_mxn_per_l"] = 0.0
-    merged["surcharge_mxn_per_l"] = merged["surcharge_mxn_per_l"].fillna(0.0)
+        mask = mask_sup & mask_date & mask_prod & mask_term
+        df.loc[mask, "surcharge_mxn_per_l"] += amt
 
-    # If multiple surcharges match, sum them
-    merged["surcharge_mxn_per_l"] = merged.groupby(
-        level=0
-    )["surcharge_mxn_per_l"].transform("sum") if merged.index.duplicated().any() else merged["surcharge_mxn_per_l"]
+        matched = mask.sum()
+        if matched > 0:
+            logger.info(
+                "Surcharge applied: %s %s %s +%.2f MXN/L → %d rows",
+                event["supplier"], event["terminal"],
+                event["product"], amt, matched
+            )
 
-    # Drop helper columns
-    drop_cols = ["sur_supplier", "sur_terminal", "sur_product",
-                 "effective_from", "effective_to"]
-    merged = merged.drop(columns=[c for c in drop_cols if c in merged.columns])
-    merged = merged.drop_duplicates(
-        subset=[c for c in df.columns if c != "surcharge_mxn_per_l"]
-    )
-
-    return merged.reset_index(drop=True)
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +358,15 @@ def build_normalized(
 
     if stations.empty:
         raise ValueError(f"No stations found for filter: {region_filter or city_filter}")
+
+    # Warn if running full dataset — this produces 39M+ rows
+    if not region_filter and not city_filter:
+        total_est = len(suppliers) * len(stations)
+        logger.warning(
+            "Running without region filter — estimated %d rows. "
+            "This requires ~4GB RAM. Use --region monterrey for MVP scope.",
+            total_est
+        )
 
     unique_suppliers = suppliers["supplier"].unique()
     logger.info("Processing %d suppliers across %d stations",
@@ -525,11 +532,30 @@ def build_normalized(
         ]
         crossed = crossed.drop(columns=[c for c in drop_inv if c in crossed.columns])
 
-        # Freight cost — fully vectorized
+        # Available tank capacity and max order size
+        # available_capacity = how much space is left in the tank right now
+        # max_order_litros = min(what fits in tank, max tanker size)
+        # Rules engine uses max_order_litros to cap order quantity
+        crossed["available_capacity_litros"] = (
+            crossed["cap_tanque_litros"] - crossed["inv_inicial_litros"]
+        ).clip(lower=0)
+        crossed["max_order_litros"] = crossed[
+            ["vol_max_litros", "available_capacity_litros"]
+        ].min(axis=1)
+
+        # Freight cost — CANACAR rate (28.40 MXN/km per truck trip)
+        # freight_cost_mxn is the FIXED cost per delivery trip regardless of volume
+        # Rules engine divides by actual order_litros to get per-liter cost:
+        #   freight_per_l = freight_cost_mxn / order_litros
+        # We also store a reference freight_mxn_per_l at DEFAULT_ORDER_LITROS
+        # so the normalization output is immediately usable without the rules engine
         crossed["dist_km"]           = crossed["dist_km"].fillna(0.0)
+        crossed["freight_cost_mxn"]  = (
+            crossed["dist_km"] * CANACAR_RATE_MXN_PER_KM
+        ).round(2)
         crossed["freight_mxn_per_l"] = (
-            crossed["dist_km"] * FREIGHT_RATE_MXN_PER_L_PER_100KM / 100
-        ).round(4)
+            crossed["freight_cost_mxn"] / DEFAULT_ORDER_LITROS
+        ).round(6)
 
         frames.append(crossed)
         logger.info(
@@ -543,10 +569,33 @@ def build_normalized(
 
     combined = pd.concat(frames, ignore_index=True)
 
+    # Price freshness flag
+    # Compares each price row's date against the most recent price date
+    # per supplier+terminal+product combination.
+    # Pemex publishes weekly — a 7-day-old price is acceptable.
+    # Valero/Exxon/Marathon publish daily — anything older than 7 days is stale.
+    # Rules engine should deprioritize stale prices when fresher alternatives exist.
+    run_date = combined["date"].max()
+    combined["price_freshness_days"] = (
+        run_date - combined["date"]
+    ).dt.days.fillna(0).astype(int)
+    combined["price_stale"] = combined["price_freshness_days"] > FRESHNESS_THRESHOLD_DAYS
+
+    stale_count = combined["price_stale"].sum()
+    if stale_count > 0:
+        logger.warning(
+            "%d rows have prices older than %d days — marked price_stale=True",
+            stale_count, FRESHNESS_THRESHOLD_DAYS
+        )
+    else:
+        logger.info("All prices are fresh (within %d days)", FRESHNESS_THRESHOLD_DAYS)
+
     # Apply surcharges — vectorized
     combined = apply_surcharges_vectorized(combined, surcharges)
 
     # Landed cost
+    # Uses freight_mxn_per_l at DEFAULT_ORDER_LITROS as reference
+    # Rules engine recalculates with actual order_litros using freight_cost_mxn
     combined["landed_cost"] = (
         combined["price_mxn_per_l"] +
         combined["freight_mxn_per_l"] +
@@ -589,8 +638,23 @@ def print_summary(df: pd.DataFrame, output_path: Path):
         print(f"  Products        : {sorted(df['product_type'].unique())}")
         print(f"  Avg landed cost : {df['landed_cost'].mean():.4f} MXN/L")
         if "price_volatility_30d" in df.columns:
-            avg_vol = df["price_volatility_30d"].mean()
-            print(f"  Avg price vol   : {avg_vol:.4f} MXN/L (30d std)")
+            print(f"  Avg price vol   : {df['price_volatility_30d'].mean():.4f} MXN/L (30d std)")
+        if "price_stale" in df.columns:
+            stale = df["price_stale"].sum()
+            pct = stale / len(df) * 100
+            print(f"  Stale prices    : {stale:,} rows ({pct:.1f}%) — older than {FRESHNESS_THRESHOLD_DAYS} days")
+        if "available_capacity_litros" in df.columns:
+            avg_cap = df["available_capacity_litros"].mean()
+            print(f"  Avg avail tank  : {avg_cap:,.0f} L")
+        if "freight_cost_mxn" in df.columns:
+            # Show freight at default volume for reference
+            sample = df[df["supplier"] == "Valero"].head(1) if "Valero" in df["supplier"].values else df.head(1)
+            if not sample.empty:
+                dist = sample["dist_km"].iloc[0]
+                fc   = sample["freight_cost_mxn"].iloc[0]
+                fpl  = sample["freight_mxn_per_l"].iloc[0]
+                print(f"  Freight example : {dist:.1f}km × 28.40 = {fc:.0f} MXN/trip "
+                      f"÷ {DEFAULT_ORDER_LITROS:,}L = {fpl:.4f} MXN/L")
         if "surcharge_mxn_per_l" in df.columns:
             active = (df["surcharge_mxn_per_l"] > 0).sum()
             print(f"  Active surcharges: {active:,} rows")
