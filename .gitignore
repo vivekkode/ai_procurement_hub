@@ -21,3 +21,4 @@ data/processed/
 # VS Code
 .vscode/
 .env
+data/
