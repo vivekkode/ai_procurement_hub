@@ -1,0 +1,118 @@
+"""
+This looks into the external factors that affect the total landing cost for the oil products
+A live risk API was created to handled this, taking shape from final normalized_price.csv file obtained
+Element considered for the external factors are:
+1)Global Market Factors 2)Weather & Seasonalility 3)Macro/Micro Finance & Tax 4)Logistics & Disruptions
+5)Regulatory & Compliance 
+Files used are a)normalized_prices.csv 
+Files from Capital Gas dataset a)cobertura_logistica.csv b)parametros_pedido.csv
+API keys used are; 
+Endpoint: api.openweathermap.org, key{e078a99412eacc76b8ead4da0fd5b526}
+Endpoint: api.news.org; key{0dd176d7bd224407931f819c2b5a876c}
+"""
+
+import pandas as pd
+import numpy as np
+
+price_df = pd.read_csv('/content/normalized_prices.csv') #normalized_prices.csv 
+logistics_df = pd.read_csv('/content/logistics.csv') #cobertura_logistica.csv
+params_df = pd.read_csv('/content/parameters.csv') #parametros_pedido.csv
+
+# live risk APIs for the constraining factors
+
+import yfinance as yf
+import requests
+import numpy as np
+
+class LiveRiskAPI:
+    def __init__(self, weather_key, news_key):
+        self.weather_key = weather_key
+        self.news_key = news_key
+        # Caches to prevent hitting free-tier limits
+        self.cache_weather = {} 
+        self.cache_logistics = {}
+        self.cache_market = None
+        self.cache_finance = None
+
+    def get_coefficients(self, row):
+
+        # MARKET RISK (Global Market & Volatility) 
+        if not self.cache_market:
+            try:
+                rbob = yf.Ticker("RB=F").history(period="5d")['Close']
+                vol = rbob.pct_change().std()
+                self.cache_market = 1.10 if vol > 0.03 else 1.05
+            except: self.cache_market = 1.05
+        
+        phi_market = self.cache_market + 0.05 if row['contract_type'] != 'Branded' else self.cache_market
+
+        # WEATHER RISK (OpenWeatherMap)
+        state = row['state']
+        if state not in self.cache_weather:
+            phi_w = 1.00
+            if state in ['Chihuahua', 'JAL', 'TMS', 'MX', 'Veracruz']:
+                try:
+                    w_url = f"https://openweathermap.org{state},MX&appid={self.weather_key}"
+                    res = requests.get(w_url).json()
+                    desc = str(res.get('weather', [{}])[0].get('description', '')).lower()
+                    
+                    # Keywords
+                    if any(x in desc for x in ['storm', 'hurricane', 'cyclone', 'heavy rain']):
+                        phi_w = 1.25
+                    elif 'rain' in desc:
+                        phi_w = 1.10
+                except: phi_w = 1.05 # Baseline coastal risk
+            self.cache_weather[state] = phi_w
+        phi_weather = self.cache_weather[state]
+
+        # FINANCE RISK (FX Spikes) 
+        if not self.cache_finance:
+            try:
+                fx = yf.Ticker("USDMXN=X").fast_info['last_price']
+                self.cache_finance = 1.12 if fx > 20.50 else 1.00
+            except: self.cache_finance = 1.02
+        phi_finance = self.cache_finance
+
+        # LOGISTICS RISK (NewsAPI) 
+        terminal = row['terminal_name']
+        if terminal not in self.cache_logistics:
+            phi_l = 1.04 # Default
+            try:
+                # Keywords: demurrage, port congestion, strike
+                q = f'"{terminal}" AND (demurrage OR "port congestion" OR strike OR fire)'
+                n_url = f"https://newsapi.org{q}&apiKey={self.news_key}"
+                news = requests.get(n_url).json()
+                if news.get('totalResults', 0) > 0:
+                    phi_l = 1.15
+            except: pass
+            self.cache_logistics[terminal] = phi_l
+        phi_logistics = self.cache_logistics[terminal]
+
+        # REGULATORY (ESG/Supplier Score)
+        phi_regulatory = 1.08 if row['supplier'] == 'PEMEX' else 1.02
+
+        # INFRASTRUCTURE (Pipeline/Rail Status)
+        phi_infra = 1.10 if row['state'] == 'Chihuahua' else 1.03
+
+        return {
+            'phi_market': round(phi_market, 3),
+            'phi_weather': round(phi_weather, 3),
+            'phi_finance': round(phi_finance, 3),
+            'phi_logistics': round(phi_logistics, 3),
+            'phi_regulatory': round(phi_regulatory, 3),
+            'phi_infra': round(phi_infra, 3)
+        }
+
+# Implement
+api = LiveRiskAPI(weather_key="e078a99412eacc76b8ead4da0fd5b526", news_key="0dd176d7bd224407931f819c2b5a876c")
+
+risk_results = price_df.apply(api.get_coefficients, axis=1)
+
+risk_columns = pd.DataFrame(risk_results.tolist())
+price_df = pd.concat([price_df, risk_columns], axis=1)
+
+# Calculate the final Multiplier for each factors
+price_df['total_risk_mult'] = price_df[['phi_market', 'phi_weather', 'phi_finance', 
+                                        'phi_logistics', 'phi_regulatory', 'phi_infra']].prod(axis=1)
+
+print(price_df.head())
