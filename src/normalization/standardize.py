@@ -156,7 +156,7 @@ def get_buyer_paths(buyer: str) -> dict:
         #   presupuesto_compra.csv, inventario_inicial.csv
     """
     if buyer.lower() == "capitalgas":
-        base = Path("data/capitalgas/outputs")
+        base = Path("data/CapitalGas/outputs")
         return {
             "tiendas":     base / "tiendas_capitalgas.csv",
             "cobertura":   base / "cobertura_logistica.csv",
@@ -280,7 +280,7 @@ def apply_surcharges_vectorized(
 
     for _, event in surcharges.iterrows():
         sup  = str(event["supplier"]).lower()
-        term = str(event["terminal"]).lower()
+        term = str(event["terminal"]).lower().strip()
         prod = str(event["product"]).lower()
         amt  = float(event["surcharge_per_l"])
         d_from = pd.to_datetime(event["effective_from"])
@@ -296,10 +296,38 @@ def apply_surcharges_vectorized(
             (prod == "all") |
             (df["product_type"].str.lower() == prod)
         )
-        mask_term = (
-            df["terminal_name"].str.lower().str.contains(term, regex=False, na=False) |
-            df["terminal_id"].str.lower().str.contains(term, regex=False, na=False)
-        )
+
+        # Terminal matching — more flexible:
+        # 1. "all" means every terminal for this supplier
+        # 2. Try substring match on terminal_name and terminal_id
+        # 3. Also try matching the city part of the surcharge terminal
+        #    against the station's ciudad column (if present)
+        # 4. Strip common suffixes like ", TMS" before matching
+        if term in ("all", "", "nan"):
+            mask_term = pd.Series(True, index=df.index)
+        else:
+            # Extract the city portion (before any comma)
+            term_city = term.split(",")[0].strip()
+
+            mask_term_name = df["terminal_name"].str.lower().str.contains(
+                term, regex=False, na=False
+            )
+            mask_term_id = df["terminal_id"].str.lower().str.contains(
+                term, regex=False, na=False
+            )
+            # Also match city portion against terminal_name
+            mask_term_city_in_name = df["terminal_name"].str.lower().str.contains(
+                term_city, regex=False, na=False
+            ) if term_city else pd.Series(False, index=df.index)
+
+            # Also match against station ciudad column if present
+            mask_term_ciudad = pd.Series(False, index=df.index)
+            if "ciudad" in df.columns:
+                mask_term_ciudad = df["ciudad"].str.lower().str.contains(
+                    term_city, regex=False, na=False
+                )
+
+            mask_term = mask_term_name | mask_term_id | mask_term_city_in_name | mask_term_ciudad
 
         mask = mask_sup & mask_date & mask_prod & mask_term
         df.loc[mask, "surcharge_mxn_per_l"] += amt
@@ -310,6 +338,17 @@ def apply_surcharges_vectorized(
                 "Surcharge applied: %s %s %s +%.2f MXN/L → %d rows",
                 event["supplier"], event["terminal"],
                 event["product"], amt, matched
+            )
+        else:
+            # Log why it didn't match for debugging
+            n_sup  = mask_sup.sum()
+            n_date = (mask_sup & mask_date).sum()
+            n_prod = (mask_sup & mask_date & mask_prod).sum()
+            logger.warning(
+                "Surcharge NOT applied: %s %s %s +%.2f — "
+                "supplier_match=%d, +date=%d, +product=%d, +terminal=0",
+                event["supplier"], event["terminal"],
+                event["product"], amt, n_sup, n_date, n_prod
             )
 
     return df
