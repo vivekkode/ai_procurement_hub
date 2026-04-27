@@ -137,11 +137,25 @@ def run_supplier(supplier_name: str, config: dict,
         folder = folder / subfolder
 
     if not folder.exists():
-        logger.error("Folder not found: %s", folder)
-        return pd.DataFrame()
+        logger.warning("Folder not found: %s — checking for existing clean data", folder)
+        return _load_existing_clean(supplier_name)
 
     parser = GenericParser(config)
     df     = parser.parse_folder(str(folder))
+
+    # ── FALLBACK: if GenericParser found nothing, check for CSV files ──
+    # CSV files that already match the standard schema can be ingested
+    # directly without needing a format-specific parser
+    if df.empty:
+        logger.info("%s — No %s files found, checking for CSV fallback...",
+                    supplier_name.upper(), config.get("file_format", ""))
+        df = _try_csv_direct_ingest(supplier_name, folder)
+
+    # ── FALLBACK 2: load previously generated clean file if it exists ──
+    if df.empty:
+        logger.info("%s — Checking for existing clean data on disk...",
+                    supplier_name.upper())
+        df = _load_existing_clean(supplier_name)
 
     if df.empty:
         logger.warning("No data extracted for: %s", supplier_name)
@@ -154,6 +168,74 @@ def run_supplier(supplier_name: str, config: dict,
     df.to_csv(output_path, index=False)
     logger.info("Saved -> %s  (%d rows)", output_path, len(df))
     return df
+
+
+def _try_csv_direct_ingest(supplier_name: str, folder: Path) -> pd.DataFrame:
+    """
+    Look for CSV files in the supplier folder that already match the
+    standard schema. This handles the case where someone drops a
+    pre-formatted CSV instead of the original supplier format.
+    """
+    csv_files = list(folder.glob("*.csv"))
+    if not csv_files:
+        # Also check parent folder (in case subfolder was used)
+        parent = folder.parent
+        if parent != DATA_RAW:
+            csv_files = list(parent.glob("*.csv"))
+
+    if not csv_files:
+        return pd.DataFrame()
+
+    frames = []
+    for f in csv_files:
+        try:
+            df = pd.read_csv(f)
+            # Check if it has enough standard columns to be valid
+            matches = [c for c in COMMON_COLUMNS if c in df.columns]
+            if len(matches) >= 5:  # at least date, supplier, product, price + 1 more
+                logger.info("CSV direct ingest: %s (%d rows, %d/%d columns match)",
+                           f.name, len(df), len(matches), len(COMMON_COLUMNS))
+                # Fill missing columns with defaults
+                if "supplier" not in df.columns:
+                    df["supplier"] = supplier_name.title()
+                if "source_file" not in df.columns:
+                    df["source_file"] = f.name
+                if "price_flag" not in df.columns:
+                    df["price_flag"] = False
+                if "country" not in df.columns:
+                    df["country"] = "MX"
+                frames.append(df[[c for c in COMMON_COLUMNS if c in df.columns]])
+            else:
+                logger.debug("CSV %s has only %d matching columns — skipping",
+                           f.name, len(matches))
+        except Exception as e:
+            logger.warning("Could not read CSV %s: %s", f.name, e)
+
+    if frames:
+        combined = pd.concat(frames, ignore_index=True)
+        logger.info("CSV direct ingest total for %s: %d rows",
+                   supplier_name, len(combined))
+        return combined
+
+    return pd.DataFrame()
+
+
+def _load_existing_clean(supplier_name: str) -> pd.DataFrame:
+    """Load a previously generated *_clean.csv if it exists on disk."""
+    clean_path = SUPPLIER_OUTPUT.get(
+        supplier_name,
+        DATA_PROCESSED / f"{supplier_name}_clean.csv"
+    )
+    if clean_path.exists():
+        try:
+            df = pd.read_csv(clean_path, low_memory=False)
+            if not df.empty:
+                logger.info("Loaded existing clean data: %s (%d rows)",
+                           clean_path.name, len(df))
+                return df
+        except Exception as e:
+            logger.warning("Could not read %s: %s", clean_path.name, e)
+    return pd.DataFrame()
 
 
 def run_unstructured_folder(folder: Path,
@@ -184,11 +266,15 @@ def discover_unknown_suppliers(known: set, auto_onboard: bool) -> dict:
     """Scan data/raw/ for supplier folders that have no known config."""
     new_configs = {}
 
+    # Folders to always skip — not supplier data
+    SKIP_FOLDERS = {"inbox", "unknown", "notices", "alerts", "surcharges", "emails",
+                    "__pycache__", ".git"}
+
     for folder in sorted(DATA_RAW.iterdir()):
         if not folder.is_dir():
             continue
         name = folder.name.lower()
-        if name in known:
+        if name in known or name in SKIP_FOLDERS:
             continue
 
         config_path = CONFIG_DIR / f"{name}_config.py"
@@ -259,6 +345,13 @@ def combine_suppliers(frames: dict) -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(valid_frames, ignore_index=True)
+
+    # Normalize dates to consistent YYYY-MM-DD strings
+    # This prevents mixed Timestamp/string issues downstream
+    combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
+    combined = combined.dropna(subset=["date"])
+    combined["date"] = combined["date"].dt.strftime("%Y-%m-%d")
+
     combined = combined.sort_values(
         ["date", "supplier", "terminal_id"]
     ).reset_index(drop=True)
@@ -300,9 +393,14 @@ def print_summary(frames: dict, combined: pd.DataFrame,
 
     if not combined.empty:
         print()
-        print(f"  Date range     : "
-              f"{combined['date'].min().date()} to "
-              f"{combined['date'].max().date()}")
+        try:
+            dates = pd.to_datetime(combined["date"], errors="coerce").dropna()
+            if not dates.empty:
+                print(f"  Date range     : "
+                      f"{dates.min().date()} to "
+                      f"{dates.max().date()}")
+        except Exception:
+            print(f"  Date range     : {combined['date'].min()} to {combined['date'].max()}")
         print(f"  Products       : {sorted(combined['product_type'].unique())}")
         print(f"  Output file    : {OUTPUT_FILES['combined']}")
 

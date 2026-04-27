@@ -68,7 +68,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # ---------------------------------------------------------------------------
 
 DATA_PROCESSED  = Path("data/processed")
-DATA_CAPITALGAS = Path("data/capitalgas/outputs")
+DATA_CAPITALGAS = Path("data/CapitalGas/outputs")
 
 PATHS = {
     "normalized":   DATA_PROCESSED  / "normalized_suppliers.csv",
